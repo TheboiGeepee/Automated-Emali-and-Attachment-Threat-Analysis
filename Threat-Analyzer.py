@@ -2,44 +2,31 @@ import os
 import re
 import hashlib
 import magic
+import shutil
+import tkinter as tk
+import email
+
+from tkinter import filedialog, messagebox, simpledialog
 from urllib.parse import urlparse
+from datetime import datetime
+from email import policy
+from email.parser import BytesParser
 from oletools.olevba import VBA_Parser
 
-# ==========================================
-# WELCOME SCREEN
-# ==========================================
-
-print("""
-====================================================
-            WELCOME TO THREAT ANALYZER
-====================================================
-
-This program was designed by Felix God'spower.
-
-Threat Analyzer helps detect potentially malicious
-files by analyzing:
-
-- Dangerous file extensions
-- Double extensions
-- File type mismatches
-- SHA256 hashes
-- File size anomalies
-- Suspicious phishing filenames
-- Hidden extensions
-- Embedded Office macros
-- Suspicious metadata
-- Malicious URLs inside files
-
-The goal is to identify suspicious indicators
-commonly used in malware and phishing attacks.
-
-====================================================
-""")
+# Gmail API Imports
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+import base64
+import pickle
 
 
-# ==========================================
+# =====================================================
 # CONFIGURATION
-# ==========================================
+# =====================================================
+
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 DANGEROUS_EXTENSIONS = [
     ".exe",
@@ -47,7 +34,8 @@ DANGEROUS_EXTENSIONS = [
     ".scr",
     ".js",
     ".vbs",
-    ".cmd"
+    ".cmd",
+    ".ps1"
 ]
 
 SUSPICIOUS_KEYWORDS = [
@@ -58,7 +46,9 @@ SUSPICIOUS_KEYWORDS = [
     "password",
     "update",
     "security",
-    "payroll"
+    "payroll",
+    "crypto",
+    "wallet"
 ]
 
 SAFE_TYPES = {
@@ -71,64 +61,102 @@ SAFE_TYPES = {
     ".xlsx": "Microsoft Excel"
 }
 
-MIN_SIZE = 2048                 # 2 KB
-MAX_SIZE = 100 * 1024 * 1024    # 100 MB
+MIN_SIZE = 2048
+MAX_SIZE = 100 * 1024 * 1024
 
 URL_REGEX = r'(https?://[^\s]+)'
 
+QUARANTINE_FOLDER = "quarantine"
+LOG_FOLDER = "logs"
 
-# ==========================================
-# SHA256 HASH GENERATION
-# ==========================================
+os.makedirs(QUARANTINE_FOLDER, exist_ok=True)
+os.makedirs(LOG_FOLDER, exist_ok=True)
+
+
+# =====================================================
+# GREETING
+# =====================================================
+
+def get_greeting():
+
+    current_hour = datetime.now().hour
+
+    if current_hour < 12:
+        return "Good Morning"
+
+    elif current_hour < 18:
+        return "Good Afternoon"
+
+    return "Good Evening"
+
+
+# =====================================================
+# SHA256 HASH
+# =====================================================
 
 def generate_sha256(file_path):
+
     sha256 = hashlib.sha256()
 
     try:
+
         with open(file_path, "rb") as file:
+
             while chunk := file.read(4096):
                 sha256.update(chunk)
 
         return sha256.hexdigest()
 
     except Exception as e:
+
         return f"Hash Error: {e}"
 
 
-# ==========================================
-# DANGEROUS EXTENSIONS
-# ==========================================
+# =====================================================
+# EXTENSION CHECK
+# =====================================================
 
 def check_extension(filename):
+
     alerts = []
+    score = 0
 
     lower_name = filename.lower()
 
     for ext in DANGEROUS_EXTENSIONS:
+
         if lower_name.endswith(ext):
+
             alerts.append(
                 f"Dangerous extension detected: {ext}"
             )
 
-    # Double extension check
+            score += 40
+
     parts = lower_name.split(".")
 
     if len(parts) >= 3:
+
         alerts.append(
             "Suspicious double extension detected"
         )
 
-    return alerts
+        score += 25
+
+    return alerts, score
 
 
-# ==========================================
-# FILE TYPE MISMATCH
-# ==========================================
+# =====================================================
+# FILE TYPE CHECK
+# =====================================================
 
 def check_file_type(file_path):
+
     alerts = []
+    score = 0
 
     try:
+
         mime = magic.Magic(mime=False)
         real_type = mime.from_file(file_path)
 
@@ -136,110 +164,137 @@ def check_file_type(file_path):
         ext = ext.lower()
 
         if ext in SAFE_TYPES:
+
             expected = SAFE_TYPES[ext]
 
             if expected.lower() not in real_type.lower():
+
                 alerts.append(
-                    f"File type mismatch! "
-                    f"Extension says {ext} "
-                    f"but actual type is '{real_type}'"
+                    f"File type mismatch detected "
+                    f"(Expected {expected}, Got {real_type})"
                 )
 
-        return alerts, real_type
+                score += 50
+
+        return alerts, score, real_type
 
     except Exception as e:
-        return [f"Type Check Error: {e}"], "Unknown"
+
+        return [f"Type Check Error: {e}"], 0, "Unknown"
 
 
-# ==========================================
-# FILE SIZE ANALYSIS
-# ==========================================
+# =====================================================
+# FILE SIZE
+# =====================================================
 
 def check_file_size(file_path):
+
     alerts = []
+    score = 0
 
     try:
+
         size = os.path.getsize(file_path)
 
         if size == 0:
+
             alerts.append("Empty file detected")
+            score += 30
 
         elif size < MIN_SIZE:
+
             alerts.append(
-                f"Extremely small file detected ({size} bytes)"
+                f"Suspiciously small file ({size} bytes)"
             )
+
+            score += 15
 
         elif size > MAX_SIZE:
+
             alerts.append(
-                f"Unusually large file detected ({size} bytes)"
+                f"Unusually large file ({size} bytes)"
             )
 
-        return alerts, size
+            score += 15
+
+        return alerts, score, size
 
     except Exception as e:
-        return [f"Size Check Error: {e}"], 0
+
+        return [f"Size Error: {e}"], 0, 0
 
 
-# ==========================================
+# =====================================================
 # SUSPICIOUS FILENAMES
-# ==========================================
+# =====================================================
 
 def check_suspicious_filename(filename):
+
     alerts = []
     score = 0
 
     lower_name = filename.lower()
 
     for keyword in SUSPICIOUS_KEYWORDS:
+
         if keyword in lower_name:
+
             alerts.append(
                 f"Suspicious keyword detected: {keyword}"
             )
+
             score += 20
 
     return alerts, score
 
 
-# ==========================================
+# =====================================================
 # HIDDEN EXTENSIONS
-# ==========================================
+# =====================================================
 
 def check_hidden_extensions(filename):
+
     alerts = []
     score = 0
 
-    # Example: document.pdf .exe
     if re.search(r'\.\w+\s+\.', filename):
+
         alerts.append(
             "Possible hidden extension trick detected"
         )
+
         score += 25
 
-    # Unicode Right-To-Left Override
     if '\u202e' in filename:
+
         alerts.append(
             "Unicode extension spoofing detected"
         )
+
         score += 40
 
     return alerts, score
 
 
-# ==========================================
+# =====================================================
 # MACRO DETECTION
-# ==========================================
+# =====================================================
 
 def check_macros(file_path):
+
     alerts = []
     score = 0
 
     try:
+
         vbaparser = VBA_Parser(file_path)
 
         if vbaparser.detect_vba_macros():
+
             alerts.append(
                 "Embedded VBA macro detected"
             )
+
             score += 30
 
         vbaparser.close()
@@ -250,42 +305,38 @@ def check_macros(file_path):
     return alerts, score
 
 
-# ==========================================
-# METADATA INSPECTION
-# ==========================================
+# =====================================================
+# METADATA
+# =====================================================
 
 def inspect_metadata(file_path):
+
     alerts = []
-    score = 0
 
     try:
-        mime = magic.Magic(mime=False)
-        real_type = mime.from_file(file_path)
 
-        suspicious_tools = [
-            "AutoIt",
-            "PowerShell",
-            "Unknown"
-        ]
+        created = os.path.getctime(file_path)
+        modified = os.path.getmtime(file_path)
 
-        for tool in suspicious_tools:
-            if tool.lower() in real_type.lower():
-                alerts.append(
-                    f"Suspicious creator/software detected: {tool}"
-                )
-                score += 20
+        created_time = datetime.fromtimestamp(created)
+        modified_time = datetime.fromtimestamp(modified)
 
-    except Exception:
-        pass
+        alerts.append(f"Created: {created_time}")
+        alerts.append(f"Last Modified: {modified_time}")
 
-    return alerts, score
+    except Exception as e:
+
+        alerts.append(f"Metadata Error: {e}")
+
+    return alerts, 0
 
 
-# ==========================================
+# =====================================================
 # URL EXTRACTION
-# ==========================================
+# =====================================================
 
-def extract_urls(file_path):
+def extract_urls_from_content(content):
+
     alerts = []
     score = 0
 
@@ -295,42 +346,42 @@ def extract_urls(file_path):
         "goo.gl"
     ]
 
-    try:
-        with open(file_path, "r", errors="ignore") as file:
-            content = file.read()
+    urls = re.findall(URL_REGEX, content)
 
-        urls = re.findall(URL_REGEX, content)
+    for url in urls:
 
-        for url in urls:
-            alerts.append(f"URL found: {url}")
+        alerts.append(f"URL Found: {url}")
 
-            parsed = urlparse(url)
-            domain = parsed.netloc.lower()
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
 
-            # URL shorteners
-            for shortener in suspicious_domains:
-                if shortener in domain:
-                    alerts.append(
-                        f"Shortened URL detected: {url}"
-                    )
-                    score += 25
+        for shortener in suspicious_domains:
 
-            # Raw IP address
-            if re.match(r'^\d+\.\d+\.\d+\.\d+$', domain):
+            if shortener in domain:
+
                 alerts.append(
-                    f"Raw IP address URL detected: {url}"
+                    f"Shortened URL detected: {url}"
                 )
-                score += 30
 
-    except Exception:
-        pass
+                score += 25
+
+        if re.match(
+            r'^\d+\.\d+\.\d+\.\d+$',
+            domain
+        ):
+
+            alerts.append(
+                f"Raw IP address URL detected: {url}"
+            )
+
+            score += 30
 
     return alerts, score
 
 
-# ==========================================
+# =====================================================
 # RISK CLASSIFICATION
-# ==========================================
+# =====================================================
 
 def classify_risk(score):
 
@@ -343,164 +394,468 @@ def classify_risk(score):
     return "LOW RISK"
 
 
-# ==========================================
-# MAIN ANALYZER
-# ==========================================
+# =====================================================
+# RECOMMENDATION ENGINE
+# =====================================================
+
+def get_recommendation(risk_level):
+
+    recommendations = {
+
+        "LOW RISK":
+        "Content appears mostly safe.",
+
+        "MEDIUM RISK":
+        "Avoid interacting until manually reviewed.",
+
+        "HIGH RISK":
+        "Quarantine or delete immediately."
+    }
+
+    return recommendations[risk_level]
+
+
+# =====================================================
+# QUARANTINE
+# =====================================================
+
+def quarantine_file(file_path):
+
+    try:
+
+        filename = os.path.basename(file_path)
+
+        destination = os.path.join(
+            QUARANTINE_FOLDER,
+            filename
+        )
+
+        shutil.copy(file_path, destination)
+
+        return (
+            f"File moved to quarantine:\n{destination}"
+        )
+
+    except Exception as e:
+
+        return f"Quarantine Error: {e}"
+
+
+# =====================================================
+# LOGGING
+# =====================================================
+
+def save_log(report):
+
+    log_name = datetime.now().strftime(
+        "%Y-%m-%d_%H-%M-%S.txt"
+    )
+
+    log_path = os.path.join(
+        LOG_FOLDER,
+        log_name
+    )
+
+    with open(log_path, "w") as log:
+        log.write(report)
+
+
+# =====================================================
+# FILE ANALYZER
+# =====================================================
 
 def analyze_file(file_path):
 
-    print("\n===================================")
-    print("        THREAT ANALYZER REPORT")
-    print("===================================\n")
-
-    if not os.path.exists(file_path):
-        print("File does not exist.")
-        return
-
     filename = os.path.basename(file_path)
-
-    print(f"File Name: {filename}")
 
     all_alerts = []
     risk_score = 0
 
-    # ----------------------------------
-    # Extension Checks
-    # ----------------------------------
-
-    ext_alerts = check_extension(filename)
-
-    if ext_alerts:
-        risk_score += 40
+    ext_alerts, ext_score = (
+        check_extension(filename)
+    )
 
     all_alerts.extend(ext_alerts)
-
-    # ----------------------------------
-    # Suspicious Filename
-    # ----------------------------------
+    risk_score += ext_score
 
     name_alerts, name_score = (
         check_suspicious_filename(filename)
     )
 
-    risk_score += name_score
     all_alerts.extend(name_alerts)
-
-    # ----------------------------------
-    # Hidden Extensions
-    # ----------------------------------
+    risk_score += name_score
 
     hidden_alerts, hidden_score = (
         check_hidden_extensions(filename)
     )
 
-    risk_score += hidden_score
     all_alerts.extend(hidden_alerts)
+    risk_score += hidden_score
 
-    # ----------------------------------
-    # File Type Check
-    # ----------------------------------
-
-    type_alerts, real_type = (
+    type_alerts, type_score, real_type = (
         check_file_type(file_path)
     )
 
-    if type_alerts:
-        risk_score += 50
-
     all_alerts.extend(type_alerts)
+    risk_score += type_score
 
-    # ----------------------------------
-    # File Size
-    # ----------------------------------
-
-    size_alerts, size = (
+    size_alerts, size_score, size = (
         check_file_size(file_path)
     )
 
     all_alerts.extend(size_alerts)
-
-    # ----------------------------------
-    # SHA256
-    # ----------------------------------
+    risk_score += size_score
 
     sha256_hash = generate_sha256(file_path)
-
-    # ----------------------------------
-    # Macro Detection
-    # ----------------------------------
 
     macro_alerts, macro_score = (
         check_macros(file_path)
     )
 
-    risk_score += macro_score
     all_alerts.extend(macro_alerts)
-
-    # ----------------------------------
-    # Metadata Inspection
-    # ----------------------------------
+    risk_score += macro_score
 
     meta_alerts, meta_score = (
         inspect_metadata(file_path)
     )
 
-    risk_score += meta_score
     all_alerts.extend(meta_alerts)
-
-    # ----------------------------------
-    # URL Extraction
-    # ----------------------------------
-
-    url_alerts, url_score = (
-        extract_urls(file_path)
-    )
-
-    risk_score += url_score
-    all_alerts.extend(url_alerts)
-
-    # ----------------------------------
-    # FINAL RISK LEVEL
-    # ----------------------------------
+    risk_score += meta_score
 
     risk_level = classify_risk(risk_score)
 
-    # ==================================
-    # DISPLAY RESULTS
-    # ==================================
+    recommendation = get_recommendation(
+        risk_level
+    )
 
-    print(f"Actual File Type : {real_type}")
-    print(f"File Size        : {size} bytes")
-    print(f"SHA256           : {sha256_hash}")
+    report = f"""
+====================================================
+                FILE ANALYSIS REPORT
+====================================================
 
-    print(f"\nRisk Score       : {risk_score}")
-    print(f"Risk Level       : {risk_level}")
+File Name      : {filename}
+Actual Type    : {real_type}
+File Size      : {size} bytes
+SHA256         : {sha256_hash}
 
-    print("\n----------- ANALYSIS RESULT -----------")
+Risk Score     : {risk_score}
+Risk Level     : {risk_level}
 
-    if all_alerts:
+Recommendation :
+{recommendation}
 
-        print("\nStatus: SUSPICIOUS\n")
+----------------------------------------------------
+"""
 
-        for alert in all_alerts:
-            print(f"[!] {alert}")
+    for alert in all_alerts:
+        report += f"\n[!] {alert}"
 
-    else:
+    report += (
+        "\n\n===================================================="
+    )
 
-        print("\nStatus: LIKELY LEGITIMATE")
-        print("No suspicious indicators found.")
+    save_log(report)
 
-    print("\n===================================\n")
+    result_text.delete(1.0, tk.END)
+    result_text.insert(tk.END, report)
 
 
-# ==========================================
-# PROGRAM START
-# ==========================================
+# =====================================================
+# GMAIL AUTHENTICATION
+# =====================================================
 
-if __name__ == "__main__":
+def gmail_authenticate():
 
-    file_path = input(
-        "Enter the file path to analyze: "
-    ).strip()
+    creds = None
 
-    analyze_file(file_path)
+    if os.path.exists("token.pickle"):
+
+        with open("token.pickle", "rb") as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+
+        if creds and creds.expired and creds.refresh_token:
+
+            creds.refresh(Request())
+
+        else:
+
+            flow = InstalledAppFlow.from_client_secrets_file(
+                "credentials.json",
+                SCOPES
+            )
+
+            creds = flow.run_local_server(port=0)
+
+        with open("token.pickle", "wb") as token:
+            pickle.dump(creds, token)
+
+    service = build(
+        "gmail",
+        "v1",
+        credentials=creds
+    )
+
+    return service
+
+
+# =====================================================
+# EMAIL ANALYZER
+# =====================================================
+
+def analyze_gmail():
+
+    try:
+
+        service = gmail_authenticate()
+
+        results = service.users().messages().list(
+            userId='me',
+            maxResults=5
+        ).execute()
+
+        messages = results.get('messages', [])
+
+        if not messages:
+
+            result_text.delete(1.0, tk.END)
+
+            result_text.insert(
+                tk.END,
+                "No emails found."
+            )
+
+            return
+
+        final_report = """
+====================================================
+                GMAIL ANALYSIS REPORT
+====================================================
+"""
+
+        for message in messages:
+
+            msg = service.users().messages().get(
+                userId='me',
+                id=message['id']
+            ).execute()
+
+            payload = msg['payload']
+            headers = payload.get('headers')
+
+            subject = "Unknown"
+            sender = "Unknown"
+
+            for header in headers:
+
+                name = header['name']
+
+                if name == 'Subject':
+                    subject = header['value']
+
+                if name == 'From':
+                    sender = header['value']
+
+            risk_score = 0
+            alerts = []
+
+            sender_lower = sender.lower()
+
+            suspicious_sender_keywords = [
+                "verify",
+                "secure",
+                "update",
+                "bank"
+            ]
+
+            for keyword in suspicious_sender_keywords:
+
+                if keyword in sender_lower:
+
+                    alerts.append(
+                        f"Suspicious sender keyword: {keyword}"
+                    )
+
+                    risk_score += 20
+
+            email_body = ""
+
+            if 'parts' in payload:
+
+                for part in payload['parts']:
+
+                    data = part.get('body', {}).get('data')
+
+                    if data:
+
+                        decoded = base64.urlsafe_b64decode(
+                            data
+                        ).decode(errors="ignore")
+
+                        email_body += decoded
+
+            phishing_keywords = [
+                "urgent",
+                "verify account",
+                "password",
+                "click here",
+                "bank"
+            ]
+
+            lower_body = email_body.lower()
+
+            for keyword in phishing_keywords:
+
+                if keyword in lower_body:
+
+                    alerts.append(
+                        f"Phishing keyword detected: {keyword}"
+                    )
+
+                    risk_score += 15
+
+            url_alerts, url_score = (
+                extract_urls_from_content(
+                    email_body
+                )
+            )
+
+            alerts.extend(url_alerts)
+            risk_score += url_score
+
+            risk_level = classify_risk(
+                risk_score
+            )
+
+            recommendation = get_recommendation(
+                risk_level
+            )
+
+            final_report += f"""
+
+----------------------------------------------------
+Sender         : {sender}
+Subject        : {subject}
+
+Risk Score     : {risk_score}
+Risk Level     : {risk_level}
+
+Recommendation :
+{recommendation}
+
+----------------------------------------------------
+"""
+
+            if alerts:
+
+                for alert in alerts:
+                    final_report += f"\n[!] {alert}"
+
+            else:
+
+                final_report += (
+                    "\nNo suspicious indicators found."
+                )
+
+        final_report += (
+            "\n\n===================================================="
+        )
+
+        save_log(final_report)
+
+        result_text.delete(1.0, tk.END)
+        result_text.insert(tk.END, final_report)
+
+    except Exception as e:
+
+        messagebox.showerror(
+            "Gmail Error",
+            str(e)
+        )
+
+
+# =====================================================
+# FILE SELECTOR
+# =====================================================
+
+def select_file():
+
+    file_path = filedialog.askopenfilename()
+
+    if file_path:
+        analyze_file(file_path)
+
+
+# =====================================================
+# GUI
+# =====================================================
+
+root = tk.Tk()
+
+root.title("Threat Analyzer")
+
+root.geometry("1100x750")
+
+
+welcome_label = tk.Label(
+    root,
+    text=f"{get_greeting()}! Welcome to Threat Analyzer",
+    font=("Arial", 18, "bold")
+)
+
+welcome_label.pack(pady=20)
+
+
+description_label = tk.Label(
+    root,
+    text=(
+        "Analyze files and Email messages for "
+        "malware indicators, phishing threats, "
+        "dangerous links, suspicious senders, "
+        "macros, and metadata anomalies."
+    ),
+    font=("Arial", 11)
+)
+
+description_label.pack(pady=5)
+
+
+scan_button = tk.Button(
+    root,
+    text="Scan File",
+    font=("Arial", 14),
+    command=select_file,
+    width=20,
+    height=2
+)
+
+scan_button.pack(pady=10)
+
+
+gmail_button = tk.Button(
+    root,
+    text="Analyze Email",
+    font=("Arial", 14),
+    command=analyze_gmail,
+    width=20,
+    height=2
+)
+
+gmail_button.pack(pady=10)
+
+
+result_text = tk.Text(
+    root,
+    wrap="word",
+    font=("Consolas", 10)
+)
+
+result_text.pack(
+    fill="both",
+    expand=True,
+    padx=20,
+    pady=20
+)
+
+root.mainloop()
